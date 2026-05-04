@@ -19,11 +19,24 @@ db.connect((err) => {
     console.error("DB connection error:", err);
   } else {
     console.log("Connected to MySQL");
+
+    // Tự tạo bảng uid_list nếu chưa có
+    db.query(`
+      CREATE TABLE IF NOT EXISTS uid_list (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        uid VARCHAR(50) UNIQUE NOT NULL,
+        label VARCHAR(100) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `, (err) => {
+      if (err) console.error("Create uid_list error:", err);
+      else console.log("uid_list table ready");
+    });
   }
 });
 
 // ================= insert.php =================
-// ESP32 gọi: GET /insert?uid=XX&status=Access
+// ESP32 gọi: GET /insert.php?uid=XX&status=Access
 
 app.get("/insert.php", (req, res) => {
   const { uid, status } = req.query;
@@ -88,7 +101,9 @@ app.get("/logs", (req, res) => {
 app.get("/", (req, res) => {
   res.send("SmartLock API is running!");
 });
+
 // ================= Mở cửa từ xa (Mobile) =================
+
 app.post("/open_door", (req, res) => {
   pendingCommand = "OPEN:remote";
   console.log("Remote open command set");
@@ -96,6 +111,7 @@ app.post("/open_door", (req, res) => {
 });
 
 // ================= Lấy logs (Mobile) =================
+
 app.get("/api/logs", (req, res) => {
   db.query(
     "SELECT * FROM logs ORDER BY time DESC LIMIT 50",
@@ -105,6 +121,63 @@ app.get("/api/logs", (req, res) => {
     }
   );
 });
+
+// ================= Quản lý UID (Mobile) =================
+
+// GET /api/uids — danh sách thẻ RFID
+app.get("/api/uids", (req, res) => {
+  db.query(
+    "SELECT id, uid, label, created_at AS createdAt FROM uid_list ORDER BY id DESC",
+    (err, results) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(results);
+    }
+  );
+});
+
+// POST /api/uids — thêm thẻ mới { uid, label }
+app.post("/api/uids", (req, res) => {
+  const { uid, label } = req.body;
+  if (!uid || !label)
+    return res.status(400).json({ error: "Missing uid or label" });
+
+  const cleanUID = uid.trim().toUpperCase(); // uppercase giống ESP32
+
+  db.query(
+    "INSERT INTO uid_list (uid, label) VALUES (?, ?)",
+    [cleanUID, label.trim()],
+    (err, result) => {
+      if (err) {
+        if (err.code === "ER_DUP_ENTRY")
+          return res.status(409).json({ error: "UID đã tồn tại" });
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ success: true, id: result.insertId });
+    }
+  );
+});
+
+// DELETE /api/uids/:id — xóa thẻ
+app.delete("/api/uids/:id", (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: "Invalid id" });
+
+  db.query("DELETE FROM uid_list WHERE id = ?", [id], (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ success: true });
+  });
+});
+
+// GET /api/uids/plain — ESP32 fetch danh sách UID thay vì hardcode
+// Trả về plain text: "UID1\nUID2\n..."
+app.get("/api/uids/plain", (req, res) => {
+  db.query("SELECT uid FROM uid_list", (err, results) => {
+    if (err) return res.status(500).send("ERROR");
+    const plain = results.map((r) => r.uid).join("\n");
+    res.type("text/plain").send(plain);
+  });
+});
+
 // ================= START =================
 
 const PORT = process.env.PORT || 3000;
