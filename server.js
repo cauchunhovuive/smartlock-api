@@ -88,7 +88,23 @@ app.get("/logs", (req, res) => {
 app.get("/", (req, res) => {
   res.send("SmartLock API is running!");
 });
+// ================= Mở cửa từ xa (Mobile) =================
+app.post("/open_door", (req, res) => {
+  pendingCommand = "OPEN:remote";
+  console.log("Remote open command set");
+  res.json({ success: true, message: "Door opening..." });
+});
 
+// ================= Lấy logs (Mobile) =================
+app.get("/api/logs", (req, res) => {
+  db.query(
+    "SELECT * FROM logs ORDER BY time DESC LIMIT 50",
+    (err, results) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(results);
+    }
+  );
+});
 // ================= START =================
 
 const PORT = process.env.PORT || 3000;
