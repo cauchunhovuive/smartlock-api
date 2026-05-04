@@ -29,7 +29,6 @@ db.connect((err) => {
   } else {
     console.log("Connected to MySQL");
 
-    // Tự tạo bảng uid_list nếu chưa có
     db.query(`
       CREATE TABLE IF NOT EXISTS uid_list (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -43,6 +42,30 @@ db.connect((err) => {
     });
   }
 });
+
+// ================= DOOR STATE =================
+// pendingCommand  → ESP32 đọc 1 lần rồi xóa
+// doorState       → UI mobile poll liên tục, không xóa
+
+const DOOR_AUTO_CLOSE_MS = 5000; // sync với ESP32
+
+let pendingCommand = "NONE";
+
+let doorState = {
+  open: false,
+  openedAt: null,
+  triggeredBy: null,
+};
+
+function openDoorState(triggeredBy) {
+  doorState = { open: true, openedAt: Date.now(), triggeredBy };
+}
+
+function checkAutoClose() {
+  if (doorState.open && Date.now() - doorState.openedAt > DOOR_AUTO_CLOSE_MS) {
+    doorState = { open: false, openedAt: null, triggeredBy: null };
+  }
+}
 
 // ================= insert.php =================
 // ESP32 gọi: GET /insert.php?uid=XX&status=Access
@@ -68,32 +91,50 @@ app.get("/insert.php", (req, res) => {
 });
 
 // ================= check_open.php =================
-// ESP32 poll: GET /check_open.php
-// Python ghi lệnh: POST /set_open  { "name": "tuanphat" }
-
-let pendingCommand = "NONE";
+// ESP32 poll: GET /check_open.php — đọc lệnh 1 lần rồi xóa
 
 app.get("/check_open.php", (req, res) => {
   if (pendingCommand !== "NONE") {
     const cmd = pendingCommand;
-    pendingCommand = "NONE"; // Xóa sau khi đọc
+    pendingCommand = "NONE";
     return res.send(cmd);
   }
   res.send("NONE");
 });
 
-// Python Flask gọi endpoint này để mở cửa
+// ================= set_open =================
+// Python Flask gọi: POST /set_open { "name": "tuanphat" }
+
 app.post("/set_open", (req, res) => {
   const { name } = req.body;
   if (!name) return res.status(400).send("Missing name");
 
   pendingCommand = `OPEN:${name}`;
+  openDoorState(name);
   console.log("Command set:", pendingCommand);
   res.send("OK");
 });
 
-// ================= Xem logs =================
-// GET /logs — xem toàn bộ log
+// ================= Mở cửa từ xa (Mobile) =================
+// POST /open_door — app mobile bấm mở
+
+app.post("/open_door", (req, res) => {
+  pendingCommand = "OPEN:remote";
+  openDoorState("remote");
+  console.log("Remote open command set");
+  res.json({ success: true, message: "Door opening..." });
+});
+
+// ================= Trạng thái cửa (Mobile) =================
+// GET /api/door-status — mobile poll để hiển thị UI
+// Khác với check_open.php: KHÔNG xóa flag, tự reset sau 5 giây
+
+app.get("/api/door-status", (req, res) => {
+  checkAutoClose();
+  res.json(doorState);
+});
+
+// ================= Logs =================
 
 app.get("/logs", (req, res) => {
   db.query(
@@ -104,22 +145,6 @@ app.get("/logs", (req, res) => {
     }
   );
 });
-
-// ================= Health check =================
-
-app.get("/", (req, res) => {
-  res.send("SmartLock API is running!");
-});
-
-// ================= Mở cửa từ xa (Mobile) =================
-
-app.post("/open_door", (req, res) => {
-  pendingCommand = "OPEN:remote";
-  console.log("Remote open command set");
-  res.json({ success: true, message: "Door opening..." });
-});
-
-// ================= Lấy logs (Mobile) =================
 
 app.get("/api/logs", (req, res) => {
   db.query(
@@ -133,7 +158,6 @@ app.get("/api/logs", (req, res) => {
 
 // ================= Quản lý UID (Mobile) =================
 
-// GET /api/uids — danh sách thẻ RFID
 app.get("/api/uids", (req, res) => {
   db.query(
     "SELECT id, uid, label, created_at AS createdAt FROM uid_list ORDER BY id DESC",
@@ -144,13 +168,12 @@ app.get("/api/uids", (req, res) => {
   );
 });
 
-// POST /api/uids — thêm thẻ mới { uid, label }
 app.post("/api/uids", (req, res) => {
   const { uid, label } = req.body;
   if (!uid || !label)
     return res.status(400).json({ error: "Missing uid or label" });
 
-  const cleanUID = uid.trim().toUpperCase(); // uppercase giống ESP32
+  const cleanUID = uid.trim().toUpperCase();
 
   db.query(
     "INSERT INTO uid_list (uid, label) VALUES (?, ?)",
@@ -166,7 +189,6 @@ app.post("/api/uids", (req, res) => {
   );
 });
 
-// DELETE /api/uids/:id — xóa thẻ
 app.delete("/api/uids/:id", (req, res) => {
   const id = parseInt(req.params.id);
   if (!id) return res.status(400).json({ error: "Invalid id" });
@@ -178,13 +200,18 @@ app.delete("/api/uids/:id", (req, res) => {
 });
 
 // GET /api/uids/plain — ESP32 fetch danh sách UID thay vì hardcode
-// Trả về plain text: "UID1\nUID2\n..."
 app.get("/api/uids/plain", (req, res) => {
   db.query("SELECT uid FROM uid_list", (err, results) => {
     if (err) return res.status(500).send("ERROR");
     const plain = results.map((r) => r.uid).join("\n");
     res.type("text/plain").send(plain);
   });
+});
+
+// ================= Health check =================
+
+app.get("/", (req, res) => {
+  res.send("SmartLock API is running!");
 });
 
 // ================= START =================
